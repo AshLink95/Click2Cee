@@ -1,4 +1,3 @@
-#include <cstdint>
 #include <string>
 #include <chrono>
 #include <cstdio>
@@ -24,8 +23,14 @@ struct log_entry {
 
 enum snd_typ { tcp, udp };
 
-/// send a single screen frame, through the chosen send type
-log_entry snd(snd_typ typ);
+log_entry cap_init();
+log_entry cap_end();
+
+log_entry init_network();
+log_entry cleanup_network();
+
+/// capture, encode and send a single screen frame, through the chosen send type
+log_entry snd(std::string addr, snd_typ typ);
 
 /// listen for the next single input
 log_entry rcv();
