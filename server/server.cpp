@@ -4,10 +4,13 @@
 
 int main() {
     cap_init().display();
+    init_network("127.0.0.1", 5000).display();
+    //TODO: send the dimensions raw
 
-    log_entry le = snd("", snd_typ::tcp);
+    log_entry le = snd();
     le.display();
 
+    cleanup_network().display();
     cap_end().display();
     return 0;
 }

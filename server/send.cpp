@@ -17,6 +17,8 @@ static const int  FPS          = 60;
 static const int  BITRATE_KBPS = 15000;
 static const int  GOP          = FPS * 10; // long on purpose, we force IDR on demand
 static const UINT ACQUIRE_WAIT = 100;      // ms. idle wake interval, not a latency floor
+// a datagram caps at 65507 bytes, so frames are split.
+static const int FRAG = 1400; // 1400 keeps each one inside the ethernet MTU
 
 // Built once by cap_init, reused by every capture(), released by cap_end.
 // Rebuilding per frame would cost ~1.5s of device and session setup, and would
@@ -149,7 +151,7 @@ log_entry cap_init() {
 }
 
 /// grab one frame and encode it. Waits until the desktop actually draws.
-bool capture(std::vector<uint8_t>& out, std::string& msg, bool force_idr) {
+bool capture(std::vector<uint8_t>& out, std::string& msg) {
     out.clear();
     if (!cap.ready) {
         msg = "capture not initialised";
@@ -198,21 +200,13 @@ bool capture(std::vector<uint8_t>& out, std::string& msg, bool force_idr) {
     cap.ctx->Flush();
     cap.dupl->ReleaseFrame();
 
-    // 6. Force a keyframe when asked, so a client that lost a packet recovers
-    //    without waiting out the GOP.
-    mfxEncodeCtrl ctrl{};
-    mfxEncodeCtrl* pctrl = nullptr;
-    if (force_idr) {
-        ctrl.FrameType = MFX_FRAMETYPE_IDR | MFX_FRAMETYPE_I | MFX_FRAMETYPE_REF;
-        pctrl = &ctrl;
-    }
-
-    // 7. Encode. MORE_DATA means the encoder took the frame but has nothing out
+    // 6. Encode. MORE_DATA means the encoder took the frame but has nothing out
     //    yet, which is normal mid-stream.
     mfxBitstream bs{};
     bs.Data      = cap.buf.data();
     bs.MaxLength = (mfxU32)cap.buf.size();
     mfxSyncPoint sp = nullptr;
+    mfxEncodeCtrl* pctrl = nullptr;
     mfxStatus sts = MFXVideoENCODE_EncodeFrameAsync(cap.ses, pctrl, rgb, &bs, &sp);
     rgb->FrameInterface->Release(rgb);
     if (sts < MFX_ERR_NONE || !sp) {
@@ -220,11 +214,11 @@ bool capture(std::vector<uint8_t>& out, std::string& msg, bool force_idr) {
         return sts == MFX_ERR_MORE_DATA;
     }
 
-    // 8. Wait for the GPU, then take the bytes. First and only time this data
+    // 7. Wait for the GPU, then take the bytes. First and only time this data
     //    touches the CPU.
     MFXVideoCORE_SyncOperation(cap.ses, sp, 10000);
     out.assign(bs.Data + bs.DataOffset, bs.Data + bs.DataOffset + bs.DataLength);
-    msg = std::format("{0}x{1}, {2} bytes", cap.width, cap.height, out.size());
+    msg = std::format("{0} bytes", out.size());
     return true;
 }
 
@@ -248,20 +242,84 @@ log_entry cap_end() {
     return log_entry(true, "capture closed");
 }
 
-log_entry init_network() {
+// Opened once, reused every frame. Per frame we only touch net.sock.
+static struct {
+    SOCKET   sock = INVALID_SOCKET;
+    uint32_t seq  = 0; // frame counter, for fragment headers
+} net;
+
+log_entry init_network(std::string addr, uint16_t port) {
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
         return log_entry(false, "WSAStartup failed");
     }
-    return log_entry(true, "WSAStartup succeeded");
+
+    net.sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (net.sock == INVALID_SOCKET) {
+        return log_entry(false, std::format("socket failed ({})", WSAGetLastError()));
+    }
+
+    sockaddr_in peer{};
+    peer.sin_family      = AF_INET;
+    peer.sin_port        = htons(port);
+    peer.sin_addr.s_addr = inet_addr(addr.c_str());
+    if (peer.sin_addr.s_addr == INADDR_NONE) {
+        closesocket(net.sock);
+        net.sock = INVALID_SOCKET;
+        return log_entry(false, "bad address");
+    }
+
+    // udp connect is not a handshake, it just pins the destination. That lets
+    // every frame use send() instead of sendto() and skip a route lookup.
+    if (connect(net.sock, (sockaddr*)&peer, sizeof(peer)) == SOCKET_ERROR) {
+        closesocket(net.sock);
+        net.sock = INVALID_SOCKET;
+        return log_entry(false, std::format("connect failed ({})", WSAGetLastError()));
+    }
+
+    // a keyframe is ~150KB of fragments going out back to back, well past the
+    // 64KB default
+    int sndbuf = 4 << 20;
+    setsockopt(net.sock, SOL_SOCKET, SO_SNDBUF, (const char*)&sndbuf, sizeof(sndbuf));
+
+    // non blocking last, so nothing above had to deal with WOULDBLOCK. From here
+    // a full send buffer drops the frame instead of stalling the capture loop.
+    u_long nonblock = 1;
+    ioctlsocket(net.sock, FIONBIO, &nonblock);
+
+    return log_entry(true, std::format("udp to {}:{}", addr, port));
 }
-bool send_tcp(std::vector<uint8_t>& out, std::string addr, std::string& msg) {
-    return false;
+
+bool send_frame(std::vector<uint8_t>& out) {
+    if (net.sock == INVALID_SOCKET) return false;
+
+    uint32_t seq   = net.seq++;
+    uint16_t count = (uint16_t)((out.size() + FRAG - 1) / FRAG);
+    uint8_t  pkt[8 + FRAG];
+
+    // seq, index and count are all the receiver needs to reassemble a frame and
+    // throw away one that came in short
+    memcpy(pkt, &(seq = htonl(seq)), 4);
+    for (uint16_t i = 0; i < count; ++i) {
+        uint16_t idx_n = htons(i), cnt_n = htons(count);
+        memcpy(pkt + 4, &idx_n, 2);
+        memcpy(pkt + 6, &cnt_n, 2);
+
+        size_t off  = (size_t)i * FRAG;
+        size_t left = out.size() - off;
+        int    n    = (int)(left < FRAG ? left : FRAG);
+        memcpy(pkt + 8, out.data() + off, n);
+
+        // socket is non blocking, so this queues the datagram and returns. A
+        // full buffer drops it rather than stalling us, and the frame is lost.
+        if (send(net.sock, (const char*)pkt, 8 + n, 0) == SOCKET_ERROR) return false;
+    }
+    return true;
 }
-bool send_udp(std::vector<uint8_t>& out, std::string addr, std::string& msg) {
-    return false;
-}
+
 log_entry cleanup_network() {
+    if (net.sock != INVALID_SOCKET) closesocket(net.sock);
+    net.sock = INVALID_SOCKET;
     WSACleanup();
     return log_entry(true, "WSACleanup succeeded");
 }
@@ -278,11 +336,10 @@ log_entry cap_end(std::string& msg) {
     return log_entry(false, "cap_end failed");
 }
 
-log_entry init_network() { return log_entry(true, "init_network succeeded"); }
-bool send_tcp(std::vector<uint8_t>& out, std::string addr, std::string& msg) {
-    return false;
+log_entry init_network(std::string addr, uint16_t port) {
+    return log_entry(true, "init_network succeeded");
 }
-bool send_udp(std::vector<uint8_t>& out, std::string addr, std::string& msg) {
+bool send_frame(std::vector<uint8_t>& out) {
     return false;
 }
 log_entry cleanup_network() { return log_entry(true, "cleanup_network succeeded"); }
@@ -291,14 +348,12 @@ log_entry cleanup_network() { return log_entry(true, "cleanup_network succeeded"
 
 /// one turn of the send loop: grab a frame, encode it, put it on the wire.
 /// cap_init must have run first; the server owns that.
-log_entry snd(std::string addr, snd_typ typ) {
+log_entry snd() {
     std::vector<uint8_t> out;
     std::string message;
-    bool status = capture(out, message, false);
-    if (!status) return log_entry(false, message);
 
-    // bool status = (typ == udp) ? send_udp(out, addr, message)
-    //                            : send_tcp(out, addr, message);
+    if (!capture(out, message)) return log_entry(false, message);
+    if (!send_frame(out)) return log_entry(false, "failed to send "+message);
 
-    return log_entry(status, message);
+    return log_entry(true, "sent "+message);
 }

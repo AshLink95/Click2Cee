@@ -21,16 +21,16 @@ struct log_entry {
     };
 };
 
-enum snd_typ { tcp, udp };
-
 log_entry cap_init();
 log_entry cap_end();
 
-log_entry init_network();
+/// open the udp socket and pin it to the client. Address lives here, not on the
+/// send path, so every frame is a bare send() with no lookup.
+log_entry init_network(std::string addr, uint16_t port);
 log_entry cleanup_network();
 
-/// capture, encode and send a single screen frame, through the chosen send type
-log_entry snd(std::string addr, snd_typ typ);
+/// capture, encode and send a single screen frame
+log_entry snd();
 
 /// listen for the next single input
 log_entry rcv();
