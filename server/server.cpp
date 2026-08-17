@@ -5,10 +5,14 @@
 int main() {
     cap_init().display();
     init_network("127.0.0.1", 5000).display();
-    //TODO: send the dimensions raw
 
-    log_entry le = snd();
-    le.display();
+    // snd() blocks until the desktop draws, so this paces itself
+    while (true) {
+        log_entry le = snd();
+        if (!le.status) { le.display(); break; }
+    }
+
+    // rcv().display(); //dbg
 
     cleanup_network().display();
     cap_end().display();
