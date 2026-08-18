@@ -15,7 +15,7 @@
 using Microsoft::WRL::ComPtr;
 static const int  FPS          = 60;
 static const int  BITRATE_KBPS = 15000;
-static const int  GOP          = FPS * 10; // long on purpose, we force IDR on demand
+static const int  GOP          = FPS * 1; // frames between IDRs, not seconds
 static const UINT ACQUIRE_WAIT = 100;      // ms. idle wake interval, not a latency floor
 // a datagram caps at 65507 bytes, so frames are split.
 static const int FRAG = 1400; // 1400 keeps each one inside the ethernet MTU
@@ -95,8 +95,7 @@ log_entry cap_init() {
     //    pass would cost ~6ms a frame; the encoder does it internally for free.
     //    Surfaces are 16-aligned, Crop* is the real picture inside that.
     //    GopRefDist 1 = no B-frames, so nothing is reordered. AsyncDepth 1 = no
-    //    second frame queued behind the first. Long GOP because a periodic IDR
-    //    is a bitrate spike; force one on request instead.
+    //    second frame queued behind the first.
     mfxVideoParam enc{};
     enc.mfx.CodecId                   = MFX_CODEC_AVC;
     enc.mfx.TargetUsage               = MFX_TARGETUSAGE_BEST_SPEED;
@@ -206,6 +205,10 @@ bool capture(std::vector<uint8_t>& out, std::string& msg) {
     bs.Data      = cap.buf.data();
     bs.MaxLength = (mfxU32)cap.buf.size();
     mfxSyncPoint sp = nullptr;
+    // No per frame control: GopPicSize already puts an IDR every GOP frames,
+    // which is what a client joining late or recovering from a lost frame waits
+    // for. P-frames in between are what keep the picture sharp inside the
+    // bitrate.
     mfxEncodeCtrl* pctrl = nullptr;
     mfxStatus sts = MFXVideoENCODE_EncodeFrameAsync(cap.ses, pctrl, rgb, &bs, &sp);
     rgb->FrameInterface->Release(rgb);
@@ -248,7 +251,7 @@ static struct {
     uint32_t seq  = 0; // frame counter, for fragment headers
 } net;
 
-log_entry init_network(std::string addr, uint16_t port) {
+log_entry init_network_snd(std::string addr, uint16_t port, std::string caddr, uint16_t port_play) {
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
         return log_entry(false, "WSAStartup failed");
@@ -259,18 +262,36 @@ log_entry init_network(std::string addr, uint16_t port) {
         return log_entry(false, std::format("socket failed ({})", WSAGetLastError()));
     }
 
-    sockaddr_in peer{};
-    peer.sin_family      = AF_INET;
-    peer.sin_port        = htons(port);
-    peer.sin_addr.s_addr = inet_addr(addr.c_str());
-    if (peer.sin_addr.s_addr == INADDR_NONE) {
+    // We own this address and port. Nothing else may take it, so a clash is
+    // fatal rather than silent.
+    sockaddr_in local{};
+    local.sin_family      = AF_INET;
+    local.sin_port        = htons(port);
+    local.sin_addr.s_addr = inet_addr(addr.c_str());
+    if (local.sin_addr.s_addr == INADDR_NONE) {
         closesocket(net.sock);
         net.sock = INVALID_SOCKET;
         return log_entry(false, "bad address");
     }
+    if (bind(net.sock, (sockaddr*)&local, sizeof(local)) == SOCKET_ERROR) {
+        closesocket(net.sock);
+        net.sock = INVALID_SOCKET;
+        return log_entry(false, std::format("bind failed ({})", WSAGetLastError()));
+    }
 
-    // udp connect is not a handshake, it just pins the destination. That lets
-    // every frame use send() instead of sendto() and skip a route lookup.
+    // The player sits at a known address and port, so we aim at it up front and
+    // never have to learn anything at runtime. udp connect is not a handshake,
+    // it just pins the destination: send() per fragment, no route lookup, and a
+    // client that restarts comes back to the same place with nothing to redo.
+    sockaddr_in peer{};
+    peer.sin_family      = AF_INET;
+    peer.sin_port        = htons(port_play);
+    peer.sin_addr.s_addr = inet_addr(caddr.c_str());
+    if (peer.sin_addr.s_addr == INADDR_NONE) {
+        closesocket(net.sock);
+        net.sock = INVALID_SOCKET;
+        return log_entry(false, "bad client address");
+    }
     if (connect(net.sock, (sockaddr*)&peer, sizeof(peer)) == SOCKET_ERROR) {
         closesocket(net.sock);
         net.sock = INVALID_SOCKET;
@@ -287,7 +308,7 @@ log_entry init_network(std::string addr, uint16_t port) {
     u_long nonblock = 1;
     ioctlsocket(net.sock, FIONBIO, &nonblock);
 
-    return log_entry(true, std::format("udp to {}:{}", addr, port));
+    return log_entry(true, std::format("udp {}:{} to {}:{}", addr, port, caddr, port_play));
 }
 
 bool send_frame(std::vector<uint8_t>& out) {
@@ -312,12 +333,15 @@ bool send_frame(std::vector<uint8_t>& out) {
 
         // socket is non blocking, so this queues the datagram and returns. A
         // full buffer drops it rather than stalling us, and the frame is lost.
-        if (send(net.sock, (const char*)pkt, 8 + n, 0) == SOCKET_ERROR) return false;
+        // CONNRESET is the icmp unreachable from a client that went away. It
+        // comes back when it does, on the same port, so this is not fatal.
+        if (send(net.sock, (const char*)pkt, 8 + n, 0) == SOCKET_ERROR)
+            return WSAGetLastError() == WSAECONNRESET;
     }
     return true;
 }
 
-log_entry cleanup_network() {
+log_entry cleanup_network_snd() {
     if (net.sock != INVALID_SOCKET) closesocket(net.sock);
     net.sock = INVALID_SOCKET;
     WSACleanup();
@@ -329,20 +353,20 @@ log_entry cleanup_network() {
 log_entry cap_init(std::string& msg) {
     return log_entry(false, "cap_init failed");
 }
-bool capture(std::vector<uint8_t>& out, std::string& msg, bool force_idr) {
+bool capture(std::vector<uint8_t>& out, std::string& msg) {
     return false;
 }
 log_entry cap_end(std::string& msg) {
     return log_entry(false, "cap_end failed");
 }
 
-log_entry init_network(std::string addr, uint16_t port) {
-    return log_entry(true, "init_network succeeded");
+log_entry init_network_snd(std::string addr, uint16_t port, std::string caddr, uint16_t cport) {
+    return log_entry(true, "init_network_snd succeeded");
 }
 bool send_frame(std::vector<uint8_t>& out) {
     return false;
 }
-log_entry cleanup_network() { return log_entry(true, "cleanup_network succeeded"); }
+log_entry cleanup_network_snd() { return log_entry(true, "cleanup_network_snd succeeded"); }
 #endif
 
 
