@@ -116,7 +116,7 @@ export default function App() {
         // one round trip per frame. rcv_udp blocks until a frame is whole.
         let bytes: Uint8Array;
         try {
-          bytes = new Uint8Array(await invoke<number[]>("rcv_udp"));
+          bytes = new Uint8Array(await invoke<ArrayBuffer>("rcv_udp"));
         } catch (e) {
           console.error("rcv_udp", e);
           await new Promise((r) => setTimeout(r, 200));

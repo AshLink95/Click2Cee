@@ -25,9 +25,24 @@ static SX: std::sync::OnceLock<std::sync::Mutex<Sender>> = std::sync::OnceLock::
 
 impl Receiver {
     pub fn connect(saddr: &str, rport: u16, caddr: &str, pport: u16) -> std::io::Result<Self> {
-        let sock = std::net::UdpSocket::bind((caddr, pport))?;
-        sock.connect((saddr, rport))?; // pins the peer so recv() needs no address
-        Ok(Self { sock, pkt: [0u8; PKT], frame: Vec::new(), next: 0 })
+        use std::net::ToSocketAddrs;
+        let one = |host: &str, port: u16| {
+            (host, port).to_socket_addrs()?.next().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "address resolved to nothing")
+            })
+        };
+        let local = one(caddr, pport)?;
+
+        let sock = socket2::Socket::new(
+            socket2::Domain::for_address(local),
+            socket2::Type::DGRAM,
+            Some(socket2::Protocol::UDP),
+        )?;
+        sock.set_recv_buffer_size(4 << 20)?;
+        sock.bind(&local.into())?;
+        sock.connect(&one(saddr, rport)?.into())?;
+
+        Ok(Self { sock: sock.into(), pkt: [0u8; PKT], frame: Vec::new(), next: 0 })
     }
 
     /// Ok(None) means the fragment was absorbed and the frame is not whole yet.
@@ -35,10 +50,6 @@ impl Receiver {
     pub fn recv_frame(&mut self) -> std::io::Result<Option<&[u8]>> {
         let n = match self.sock.recv(&mut self.pkt) {
             Ok(n) => n,
-            // An icmp bounce or an interrupted syscall is one bad moment, not a
-            // finished socket, and clears itself by the next call. Losing a
-            // frame over it is the right price. Every other kind keeps failing,
-            // so it is left to propagate rather than spin here forever.
             Err(e) if matches!(
                 e.kind(),
                 std::io::ErrorKind::Interrupted
@@ -51,11 +62,8 @@ impl Receiver {
             Err(e) => return Err(e),
         };
         if n < HDR { return Ok(None); }
-        // from_be_bytes is the other half of the server's htonl/htons
         let idx = u16::from_be_bytes(self.pkt[4..6].try_into().unwrap());
         let count = u16::from_be_bytes(self.pkt[6..8].try_into().unwrap());
-        // a count of 0 is never reached by next, and an index past the end is
-        // nonsense: either one leaves the buffer growing with no way to finish
         if count == 0 || idx >= count { return Ok(None); }
 
         if idx == 0 {
@@ -122,11 +130,8 @@ fn init_send(addr: &str, port: u16) -> std::io::Result<()> {
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::AlreadyExists, "already connected"))
 }
 
-/// Blocks until a whole frame is assembled, then hands it to the webview.
-/// async so tauri runs it off the main thread, otherwise the blocking recv
-/// freezes the window.
 #[tauri::command]
-async fn rcv_udp() -> Result<Vec<u8>, String> {
+async fn rcv_udp() -> Result<tauri::ipc::Response, String> {
     let mut rx = RX
         .get()
         .ok_or("receiver not initialised")?
@@ -135,14 +140,14 @@ async fn rcv_udp() -> Result<Vec<u8>, String> {
 
     loop {
         if rx.recv_frame().map_err(|e| e.to_string())?.is_some() {
-            return Ok(rx.frame.clone());
+            return Ok(tauri::ipc::Response::new(rx.frame.clone()));
         }
     }
 }
 
 #[tauri::command]
 fn snd_input(keys: Vec<String>, x: u16, y: u16, btn: u8) -> Result<(), String> {
-    // println!("keys: {:?}, x: {}, y: {}, btn: {}", keys, x, y, btn); //dbg
+    // println!("keys: {:?}, x: {}, y: {}, mbtn: {}", keys, x, y, btn); //dbg
     SX.get()
         .ok_or("sender not initialised")?
         .lock()
