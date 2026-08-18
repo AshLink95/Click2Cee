@@ -24,10 +24,13 @@ struct log_entry {
 log_entry cap_init();
 log_entry cap_end();
 
-/// open the udp socket and pin it to the client. Address lives here, not on the
-/// send path, so every frame is a bare send() with no lookup.
-log_entry init_network(std::string addr, uint16_t port);
+log_entry init_network(std::string saddr, uint16_t port_snd, uint16_t port_rcv, std::string caddr, uint16_t port_play);
+log_entry init_network_snd(std::string addr, uint16_t port, std::string caddr, uint16_t port_play);
+log_entry init_network_rcv(std::string saddr, uint16_t port, std::string caddr);
+
 log_entry cleanup_network();
+log_entry cleanup_network_snd();
+log_entry cleanup_network_rcv();
 
 /// capture, encode and send a single screen frame
 log_entry snd();
