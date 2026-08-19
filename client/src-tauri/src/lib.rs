@@ -1,4 +1,4 @@
-const FRAG: usize = 1400;
+const FRAG: usize = 1100;
 const HDR: usize = 8; // seq u32, index u16, count u16
 const PKT: usize = HDR + FRAG;
 const MAX_FRAME: usize = 4 << 20; // ceiling on reassembly, past any real frame

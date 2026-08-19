@@ -25,7 +25,17 @@ Made with GPU accelerated screen capture and custom-made UDP protocol for both s
 
 **To run the client:**
 
-* **WebView2 Runtime** — Tauri's webview on Windows, preinstalled on Windows 11. Supplies WebCodecs and the H.264 decoder, which is the real requirement here, more than the OS is
+* **A WebCodecs-capable webview with an H.264 decoder** — this is the real requirement, more than the OS is
+  * **Windows** — the WebView2 Runtime, preinstalled on Windows 11. Nothing else to do
+  * **Linux** — Tauri uses WebKitGTK, which decodes through GStreamer. The H.264 elements ship separately and most desktop installs omit them:
+
+    ```bash
+    sudo pacman -S gst-libav gst-plugins-bad
+    ```
+
+    Verify with `gst-inspect-1.0 avdec_h264`. If it reports no such element the decoder is missing, `VideoDecoder.configure()` fails with *no decoder found*, and the canvas stays black while packets arrive normally.
+
+    > `openh264` will **not** do — it is Baseline only, and the stream is High profile. It needs `avdec_h264` or a VA-API element.
 * **GPU driver with H.264 decode** — software decode will not hold 1080p60
 
 **To run the server:**

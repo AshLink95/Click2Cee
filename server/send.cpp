@@ -17,8 +17,7 @@ static const int  FPS          = 60;
 static const int  BITRATE_KBPS = 15000;
 static const int  GOP          = FPS * 1; // frames between IDRs, not seconds
 static const UINT ACQUIRE_WAIT = 100;      // ms. idle wake interval, not a latency floor
-// a datagram caps at 65507 bytes, so frames are split.
-static const int FRAG = 1400; // 1400 keeps each one inside the ethernet MTU
+static const int FRAG = 1100; // a datagram caps at 65507 bytes, so frames are split
 
 // Built once by cap_init, reused by every capture(), released by cap_end.
 // Rebuilding per frame would cost ~1.5s of device and session setup, and would
