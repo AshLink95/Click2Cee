@@ -87,7 +87,7 @@ flowchart LR
     subgraph SERVER["🖥️  Server — C++ / Windows"]
         direction TB
         DUP["DXGI Desktop<br/>Duplication"] --> ENC["oneVPL<br/>H.264 Encoder"]
-        ENC --> FRAG["Fragmenter<br/>1400B payloads"]
+        ENC --> FRAG["Fragmenter<br/>1100B payloads"]
         RCV["Input Injector<br/>SendInput"]
     end
 
@@ -118,7 +118,7 @@ Compositor present
   └─ AcquireNextFrame          waits on the GPU, wakes the instant the desktop draws
      └─ D3D11 texture          stays in VRAM, never round-trips through system memory
         └─ oneVPL encode       BGRA in, Annex-B H.264 out, IDR every GOP
-           └─ Fragment         seq/index/count header + 1400B, MTU-safe
+           └─ Fragment         seq/index/count header + 1100B, MTU-safe
               └─ UDP  ─────────────────────►
                                               └─ Reassemble    in-order or drop the frame
                                                  └─ VideoDecoder   codec parsed from SPS
@@ -148,14 +148,14 @@ Both directions are hand-specified. Nothing is negotiated at runtime.
 
 ### Video fragment — server → client
 
-Big-endian, 8-byte header, payload up to 1400 bytes.
+Big-endian, 8-byte header, payload up to 1100 bytes.
 
 | Offset | Size | Field | Meaning |
 |---:|---:|---|---|
 | `0` | 4 | `seq` | frame counter |
 | `4` | 2 | `index` | fragment position within the frame |
 | `6` | 2 | `count` | total fragments in this frame |
-| `8` | ≤1400 | `payload` | raw Annex-B slice |
+| `8` | ≤1100 | `payload` | raw Annex-B slice |
 
 A missing or reordered fragment discards the whole frame — a partial frame is worse than none, and the next IDR repairs the stream.
 
