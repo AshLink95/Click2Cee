@@ -349,13 +349,13 @@ log_entry cleanup_network_snd() {
 
 #elif defined(__linux__)
 //TODO: for linux, capture with pipewire
-log_entry cap_init(std::string& msg) {
+log_entry cap_init() {
     return log_entry(false, "cap_init failed");
 }
 bool capture(std::vector<uint8_t>& out, std::string& msg) {
     return false;
 }
-log_entry cap_end(std::string& msg) {
+log_entry cap_end() {
     return log_entry(false, "cap_end failed");
 }
 

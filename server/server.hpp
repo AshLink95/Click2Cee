@@ -24,7 +24,8 @@ struct log_entry {
 log_entry cap_init();
 log_entry cap_end();
 
-log_entry init_network(std::string saddr, uint16_t port_snd, uint16_t port_rcv, std::string caddr, uint16_t port_play);
+log_entry init_network(std::string saddr, uint16_t port_snd, uint16_t port_rcv,
+                       std::string caddr, uint16_t port_play);
 log_entry init_network_snd(std::string addr, uint16_t port, std::string caddr, uint16_t port_play);
 log_entry init_network_rcv(std::string saddr, uint16_t port, std::string caddr);
 

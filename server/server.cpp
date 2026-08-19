@@ -24,8 +24,8 @@ static std::string env(const std::string& key, const std::string& fallback) {
     return fallback;
 }
 
-log_entry init_network(std::string saddr, std::string caddr, uint16_t port_snd,
-                       uint16_t port_rcv, uint16_t port_play) {
+log_entry init_network(std::string saddr, uint16_t port_snd, uint16_t port_rcv,
+                       std::string caddr, uint16_t port_play) {
     log_entry snd = init_network_snd(saddr, port_snd, caddr, port_play);
     if (!snd.status) return snd;
     log_entry rcv = init_network_rcv(saddr, port_rcv, caddr);
@@ -46,8 +46,10 @@ int main() {
     uint16_t port_snd = std::stoi(env("VIDEO_PORT", "5000"));
     uint16_t port_rcv = std::stoi(env("INPUT_PORT", "5001"));
     uint16_t port_play = std::stoi(env("PLAYER_PORT", "5002"));
-    cap_init().display();
-    init_network(host, clnt, port_snd, port_rcv, port_play).display();
+    log_entry cap_works = cap_init();
+    cap_works.display(); if (!cap_works.status) return 1;
+    log_entry net_works = init_network(host, port_snd, port_rcv, clnt, port_play);
+    net_works.display(); if (!net_works.status) return 1;
 
     std::signal(SIGINT, stop);
     std::signal(SIGTERM, stop);
