@@ -58,7 +58,7 @@ Made with GPU accelerated screen capture and custom-made UDP protocol for both s
 
 * Firewall rules allowing inbound UDP on `INPUT_PORT` (server, default `5001`) and `PLAYER_PORT` (client, default `5002`)
 * Roughly **15 Mbit/s sustained** for video at the default bitrate, plus headroom
-* A path MTU of at least **1408 bytes** so fragments are not split again in transit
+* A path MTU of at least **1108 bytes** so fragments are not split again in transit
 * **Low packet loss.** A single lost fragment discards its entire frame, and the loss compounds until the next IDR — this is why the tool is intended for a LAN or a private VPN rather than the open internet
 
 > [!WARNING]
