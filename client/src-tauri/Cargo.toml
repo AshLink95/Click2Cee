@@ -2,7 +2,7 @@
 name = "c2c_client"
 version = "0.1.0"
 description = "The client of a light and efficient remote desktop tool"
-authors = ["you"]
+authors = ["AshLink", "Big Laude"]
 edition = "2021"
 
 [lib]
